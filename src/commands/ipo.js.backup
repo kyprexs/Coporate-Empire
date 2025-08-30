@@ -1,0 +1,400 @@
+const { SlashCommandBuilder, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+
+module.exports = {
+    data: new SlashCommandBuilder()
+        .setName('ipo')
+        .setDescription('Initial Public Offering - Take your company public')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('launch')
+                .setDescription('Launch an IPO for your company')
+                .addStringOption(option =>
+                    option
+                        .setName('company')
+                        .setDescription('Company name or ticker symbol')
+                        .setRequired(true)
+                )
+                .addNumberOption(option =>
+                    option
+                        .setName('shares_to_sell')
+                        .setDescription('Number of shares to sell to public (max 49% of company)')
+                        .setRequired(true)
+                        .setMinValue(10000)
+                        .setMaxValue(490000)
+                )
+                .addNumberOption(option =>
+                    option
+                        .setName('price_per_share')
+                        .setDescription('IPO price per share')
+                        .setRequired(true)
+                        .setMinValue(1)
+                        .setMaxValue(1000)
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('status')
+                .setDescription('Check IPO eligibility and company public status')
+                .addStringOption(option =>
+                    option
+                        .setName('company')
+                        .setDescription('Company name or ticker symbol')
+                        .setRequired(true)
+                )
+        ),
+
+    async execute(interaction, client) {
+        const subcommand = interaction.options.getSubcommand();
+
+        switch (subcommand) {
+            case 'launch':
+                await this.handleLaunch(interaction, client);
+                break;
+            case 'status':
+                await this.handleStatus(interaction, client);
+                break;
+        }
+    },
+
+    async handleLaunch(interaction, client) {
+        try {
+            const companyQuery = interaction.options.getString('company');
+            const sharesToSell = interaction.options.getNumber('shares_to_sell');
+            const pricePerShare = interaction.options.getNumber('price_per_share');
+
+            // Find the company
+            const company = await client.db.db.get(`
+                SELECT c.*, u.username as owner_username 
+                FROM companies c
+                JOIN users u ON c.owner_id = u.discord_id
+                WHERE (LOWER(c.name) LIKE LOWER(?) OR LOWER(c.ticker_symbol) LIKE LOWER(?))
+                AND c.status = 'active'
+            `, [`%${companyQuery}%`, `%${companyQuery}%`]);
+
+            if (!company) {
+                await interaction.reply({
+                    content: '❌ No active company found with that name or ticker symbol.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if user owns the company
+            if (company.owner_id !== interaction.user.id) {
+                await interaction.reply({
+                    content: '❌ You can only launch IPOs for companies you own.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check IPO eligibility
+            const eligibility = await this.checkIPOEligibility(client, company);
+            if (!eligibility.eligible) {
+                await interaction.reply({
+                    content: `❌ Your company is not eligible for IPO: ${eligibility.reason}`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Validate share percentage (max 49% of company)
+            const maxShares = Math.floor(company.shares_outstanding * 0.49);
+            if (sharesToSell > maxShares) {
+                await interaction.reply({
+                    content: `❌ You cannot sell more than 49% of your company. Maximum: ${maxShares.toLocaleString()} shares.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if company already has shares available (already public)
+            if (company.shares_available > 0) {
+                await interaction.reply({
+                    content: '❌ Your company is already public. Use stock commands to manage additional share sales.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Validate pricing (should be reasonable compared to calculated value)
+            const calculatedPrice = company.current_valuation / company.shares_outstanding;
+            if (pricePerShare > calculatedPrice * 2 || pricePerShare < calculatedPrice * 0.5) {
+                await interaction.reply({
+                    content: `❌ IPO price seems unrealistic. Suggested range: $${(calculatedPrice * 0.5).toFixed(2)} - $${(calculatedPrice * 2).toFixed(2)} per share.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Calculate IPO proceeds
+            const totalProceeds = sharesToSell * pricePerShare;
+            const listingFee = totalProceeds * 0.05; // 5% listing fee
+            const netProceeds = totalProceeds - listingFee;
+
+            // Process the IPO
+            await client.db.db.run('BEGIN TRANSACTION');
+
+            try {
+                // Add shares to market
+                await client.db.db.run(`
+                    UPDATE companies 
+                    SET shares_available = shares_available + ?
+                    WHERE id = ?
+                `, [sharesToSell, company.id]);
+
+                // Add proceeds to company owner
+                await client.db.updateUserCash(company.owner_id, netProceeds);
+
+                // Pay listing fee to stock exchange
+                const exchange = await client.db.getMainStockExchange();
+                if (exchange) {
+                    await client.db.updateUserCash(exchange.owner_id, listingFee);
+                    await client.db.db.run(`
+                        UPDATE stock_exchanges 
+                        SET total_fees_collected = total_fees_collected + ?
+                        WHERE id = ?
+                    `, [listingFee, exchange.id]);
+                }
+
+                // Record IPO transaction
+                await client.db.db.run(`
+                    INSERT INTO stock_transactions 
+                    (company_id, shares, price_per_share, total_amount, exchange_fee, 
+                     exchange_owner_id, transaction_type)
+                    VALUES (?, ?, ?, ?, ?, ?, 'ipo')
+                `, [company.id, sharesToSell, pricePerShare, totalProceeds, listingFee, exchange?.owner_id]);
+
+                await client.db.db.run('COMMIT');
+
+                const embed = new EmbedBuilder()
+                    .setTitle('🎉 IPO Launched Successfully!')
+                    .setColor(0x00FF00)
+                    .addFields(
+                        { name: 'Company', value: `${company.name} (${company.ticker_symbol})`, inline: true },
+                        { name: 'Shares Offered', value: sharesToSell.toLocaleString(), inline: true },
+                        { name: 'IPO Price', value: `$${pricePerShare.toFixed(2)}`, inline: true },
+                        { name: 'Total Proceeds', value: `$${totalProceeds.toLocaleString()}`, inline: true },
+                        { name: 'Listing Fee (5%)', value: `$${listingFee.toLocaleString()}`, inline: true },
+                        { name: 'Net Proceeds', value: `$${netProceeds.toLocaleString()}`, inline: true },
+                        { name: 'Ownership Retained', value: `${(100 - (sharesToSell / company.shares_outstanding * 100)).toFixed(1)}%`, inline: true },
+                        { name: 'Public Ownership', value: `${(sharesToSell / company.shares_outstanding * 100).toFixed(1)}%`, inline: true }
+                    )
+                    .setDescription(`🎊 **Congratulations!** ${company.name} is now a publicly traded company! Your shares are available for purchase on the Corporate Empire Stock Exchange.`)
+                    .setTimestamp()
+                    .setFooter({ text: 'Corporate Empire Stock Exchange' });
+
+                await interaction.reply({ embeds: [embed] });
+
+                // Announce IPO to the server
+                try {
+                    const announcementChannel = interaction.guild.channels.cache.find(ch => 
+                        ch.name === 'market-announcements' || 
+                        ch.name === 'stock-market' || 
+                        ch.name === 'general'
+                    );
+
+                    if (announcementChannel) {
+                        const announcementEmbed = new EmbedBuilder()
+                            .setTitle('🔔 New IPO Alert!')
+                            .setColor(0x32CD32)
+                            .addFields(
+                                { name: 'Company', value: `${company.name} (${company.ticker_symbol})`, inline: true },
+                                { name: 'IPO Price', value: `$${pricePerShare.toFixed(2)}`, inline: true },
+                                { name: 'Shares Available', value: sharesToSell.toLocaleString(), inline: true }
+                            )
+                            .setDescription(`🎉 ${company.name} has just gone public! Buy shares now with \`/stock buy ${company.ticker_symbol || company.name}\``)
+                            .setTimestamp();
+
+                        await announcementChannel.send({ embeds: [announcementEmbed] });
+                    }
+                } catch (announceError) {
+                    console.log('Could not send IPO announcement:', announceError.message);
+                }
+
+            } catch (error) {
+                await client.db.db.run('ROLLBACK');
+                throw error;
+            }
+
+        } catch (error) {
+            console.error('Error in IPO launch command:', error);
+            await interaction.reply({
+                content: '❌ There was an error launching your IPO.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleStatus(interaction, client) {
+        try {
+            const companyQuery = interaction.options.getString('company');
+
+            // Find the company
+            const company = await client.db.db.get(`
+                SELECT c.*, u.username as owner_username 
+                FROM companies c
+                JOIN users u ON c.owner_id = u.discord_id
+                WHERE (LOWER(c.name) LIKE LOWER(?) OR LOWER(c.ticker_symbol) LIKE LOWER(?))
+                AND c.status = 'active'
+            `, [`%${companyQuery}%`, `%${companyQuery}%`]);
+
+            if (!company) {
+                await interaction.reply({
+                    content: '❌ No active company found with that name or ticker symbol.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const eligibility = await this.checkIPOEligibility(client, company);
+            const isPublic = company.shares_available > 0;
+
+            // Get IPO history if public
+            let ipoHistory = null;
+            if (isPublic) {
+                ipoHistory = await client.db.db.get(`
+                    SELECT * FROM stock_transactions 
+                    WHERE company_id = ? AND transaction_type = 'ipo' 
+                    ORDER BY timestamp LIMIT 1
+                `, [company.id]);
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle(`🏢 ${company.name} - IPO Status`)
+                .setColor(isPublic ? 0x32CD32 : (eligibility.eligible ? 0x0099FF : 0xFF0000))
+                .addFields(
+                    { name: 'Company Status', value: isPublic ? '🌐 Public Company' : '🔒 Private Company', inline: true },
+                    { name: 'IPO Eligible', value: eligibility.eligible ? '✅ Yes' : '❌ No', inline: true },
+                    { name: 'Current Valuation', value: `$${company.current_valuation.toLocaleString()}`, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire IPO Office' });
+
+            if (isPublic) {
+                const currentPrice = company.current_valuation / company.shares_outstanding;
+                const publicOwnership = (company.shares_outstanding - company.shares_available) / company.shares_outstanding * 100;
+
+                embed.addFields(
+                    { name: 'Current Stock Price', value: `$${currentPrice.toFixed(2)}`, inline: true },
+                    { name: 'Shares Outstanding', value: company.shares_outstanding.toLocaleString(), inline: true },
+                    { name: 'Shares Available', value: company.shares_available.toLocaleString(), inline: true },
+                    { name: 'Public Ownership', value: `${(100 - publicOwnership).toFixed(1)}%`, inline: true },
+                    { name: 'Owner Retention', value: `${publicOwnership.toFixed(1)}%`, inline: true }
+                );
+
+                if (ipoHistory) {
+                    embed.addFields({
+                        name: '📈 IPO Details',
+                        value: `**IPO Date:** ${new Date(ipoHistory.timestamp).toLocaleDateString()}\\n**IPO Price:** $${ipoHistory.price_per_share.toFixed(2)}\\n**Shares Sold:** ${ipoHistory.shares.toLocaleString()}\\n**Proceeds:** $${ipoHistory.total_amount.toLocaleString()}`,
+                        inline: false
+                    });
+                }
+            } else {
+                embed.setDescription(eligibility.eligible ? 
+                    '✅ This company is eligible to go public! Use `/ipo launch` to start the IPO process.' :
+                    `❌ This company is not eligible for IPO: ${eligibility.reason}`);
+
+                if (eligibility.eligible) {
+                    const suggestedPrice = company.current_valuation / company.shares_outstanding;
+                    embed.addFields({
+                        name: '💡 IPO Suggestions',
+                        value: `**Suggested Price Range:** $${(suggestedPrice * 0.8).toFixed(2)} - $${(suggestedPrice * 1.2).toFixed(2)}\\n**Max Shares (49%):** ${Math.floor(company.shares_outstanding * 0.49).toLocaleString()}\\n**Potential Proceeds:** $${((Math.floor(company.shares_outstanding * 0.49) * suggestedPrice)).toLocaleString()}`,
+                        inline: false
+                    });
+                }
+            }
+
+            if (!eligibility.eligible) {
+                embed.addFields({
+                    name: '📋 IPO Requirements',
+                    value: '• Company age: 30+ days\\n• Minimum valuation: $500,000\\n• Positive cash flow for 2+ months\\n• No outstanding legal issues\\n• Valid ticker symbol',
+                    inline: false
+                });
+            }
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in IPO status command:', error);
+            await interaction.reply({
+                content: '❌ There was an error checking IPO status.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async checkIPOEligibility(client, company) {
+        try {
+            // Check company age (minimum 30 days)
+            const foundedDate = new Date(company.founded_date);
+            const daysSinceFoundation = (Date.now() - foundedDate.getTime()) / (1000 * 60 * 60 * 24);
+            
+            if (daysSinceFoundation < 30) {
+                return { 
+                    eligible: false, 
+                    reason: `Company must be at least 30 days old (currently ${Math.floor(daysSinceFoundation)} days)` 
+                };
+            }
+
+            // Check minimum valuation
+            if (company.current_valuation < 500000) {
+                return { 
+                    eligible: false, 
+                    reason: `Company valuation too low (minimum $500,000, current $${company.current_valuation.toLocaleString()})` 
+                };
+            }
+
+            // Check for ticker symbol
+            if (!company.ticker_symbol) {
+                return { 
+                    eligible: false, 
+                    reason: 'Company must have a ticker symbol' 
+                };
+            }
+
+            // Check for positive performance
+            const recentPerformance = await client.db.db.get(`
+                SELECT AVG(net_monthly_income) as avg_income, COUNT(*) as months
+                FROM company_performance 
+                WHERE company_id = ? 
+                ORDER BY period DESC 
+                LIMIT 2
+            `, [company.id]);
+
+            if (!recentPerformance || recentPerformance.months < 2) {
+                return { 
+                    eligible: false, 
+                    reason: 'Company must have at least 2 months of financial history' 
+                };
+            }
+
+            if (recentPerformance.avg_income <= 0) {
+                return { 
+                    eligible: false, 
+                    reason: 'Company must show positive cash flow for recent months' 
+                };
+            }
+
+            // Check for outstanding legal issues
+            const pendingLawsuits = await client.db.db.get(`
+                SELECT COUNT(*) as pending_cases
+                FROM lawsuits 
+                WHERE defendant_company_id = ? AND status IN ('pending', 'active')
+            `, [company.id]);
+
+            if (pendingLawsuits.pending_cases > 0) {
+                return { 
+                    eligible: false, 
+                    reason: `Company has ${pendingLawsuits.pending_cases} pending legal case(s)` 
+                };
+            }
+
+            return { eligible: true, reason: null };
+
+        } catch (error) {
+            console.error('Error checking IPO eligibility:', error);
+            return { eligible: false, reason: 'Error checking eligibility' };
+        }
+    }
+};

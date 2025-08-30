@@ -1,0 +1,314 @@
+const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+
+module.exports = {
+    data: new SlashCommandBuilder()
+        .setName('admin')
+        .setDescription('Administrative commands for economic system management')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('economy_status')
+                .setDescription('View overall economic system status')
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('trigger_cycle')
+                .setDescription('Manually trigger monthly economic cycle (for testing)')
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('default_companies')
+                .setDescription('View or reinitialize default companies')
+                .addStringOption(option =>
+                    option
+                        .setName('action')
+                        .setDescription('Action to perform')
+                        .setRequired(false)
+                        .addChoices(
+                            { name: 'View current status', value: 'view' },
+                            { name: 'Reinitialize all', value: 'reinit' }
+                        )
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('scheduler_status')
+                .setDescription('View economic scheduler status')
+        ),
+
+    async execute(interaction, client) {
+        // Check if user is admin
+        if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
+            await interaction.reply({
+                content: '❌ This command is only available to administrators.',
+                ephemeral: true
+            });
+            return;
+        }
+
+        const subcommand = interaction.options.getSubcommand();
+
+        switch (subcommand) {
+            case 'economy_status':
+                await this.handleEconomyStatus(interaction, client);
+                break;
+            case 'trigger_cycle':
+                await this.handleTriggerCycle(interaction, client);
+                break;
+            case 'default_companies':
+                await this.handleDefaultCompanies(interaction, client);
+                break;
+            case 'scheduler_status':
+                await this.handleSchedulerStatus(interaction, client);
+                break;
+        }
+    },
+
+    async handleEconomyStatus(interaction, client) {
+        try {
+            const currentPeriod = new Date().toISOString().substring(0, 7);
+
+            // Get overall statistics
+            const [companyStats, loanStats, patentStats, taxStats, bankBalance] = await Promise.all([
+                client.db.db.get(`
+                    SELECT 
+                        COUNT(*) as total_companies,
+                        AVG(current_valuation) as avg_valuation,
+                        SUM(current_valuation) as total_market_cap
+                    FROM companies 
+                    WHERE status = 'active'
+                `),
+                client.db.db.get(`
+                    SELECT 
+                        COUNT(*) as active_loans,
+                        SUM(remaining_balance) as total_debt,
+                        AVG(interest_rate) as avg_interest_rate
+                    FROM loans 
+                    WHERE status = 'active'
+                `),
+                client.db.db.get(`
+                    SELECT 
+                        COUNT(*) as total_patents,
+                        COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_patents,
+                        SUM(CASE WHEN status = 'approved' THEN monthly_revenue ELSE 0 END) as total_patent_revenue
+                    FROM patents
+                `),
+                client.db.db.get(`
+                    SELECT 
+                        COUNT(DISTINCT company_id) as taxpaying_companies,
+                        SUM(tax_amount) as total_taxes_collected
+                    FROM tax_records 
+                    WHERE tax_period = ?
+                `, [currentPeriod]),
+                client.db.db.get(`
+                    SELECT * FROM central_bank_balance 
+                    WHERE period = ? 
+                    ORDER BY last_updated DESC 
+                    LIMIT 1
+                `, [currentPeriod])
+            ]);
+
+            // Get employee statistics
+            const employeeStats = await client.db.db.get(`
+                SELECT 
+                    COUNT(*) as total_employees,
+                    COUNT(CASE WHEN employee_type = 'npc' THEN 1 END) as npc_workers,
+                    COUNT(CASE WHEN employee_type = 'player' THEN 1 END) as player_workers,
+                    SUM(salary) as total_monthly_payroll
+                FROM employees 
+                WHERE status = 'active'
+            `);
+
+            const embed = new EmbedBuilder()
+                .setTitle('🏛️ Corporate Empire - Economic Status')
+                .setColor(0x228B22)
+                .setDescription(`Economic overview for period ${currentPeriod}`)
+                .addFields(
+                    { name: '🏢 Companies', value: `**Active:** ${companyStats.total_companies || 0}\\n**Total Market Cap:** $${(companyStats.total_market_cap || 0).toLocaleString()}\\n**Average Valuation:** $${Math.round(companyStats.avg_valuation || 0).toLocaleString()}`, inline: true },
+                    { name: '👥 Employment', value: `**Total Employees:** ${employeeStats.total_employees || 0}\\n**NPC Workers:** ${employeeStats.npc_workers || 0}\\n**Player Workers:** ${employeeStats.player_workers || 0}\\n**Monthly Payroll:** $${(employeeStats.total_monthly_payroll || 0).toLocaleString()}`, inline: true },
+                    { name: '🏦 Loans', value: `**Active Loans:** ${loanStats.active_loans || 0}\\n**Total Debt:** $${(loanStats.total_debt || 0).toLocaleString()}\\n**Avg Interest Rate:** ${((loanStats.avg_interest_rate || 0) * 100).toFixed(2)}%`, inline: true },
+                    { name: '📋 Patents', value: `**Total Patents:** ${patentStats.total_patents || 0}\\n**Approved:** ${patentStats.approved_patents || 0}\\n**Monthly Revenue:** $${(patentStats.total_patent_revenue || 0).toLocaleString()}`, inline: true },
+                    { name: '🏛️ Government', value: `**Tax Revenue:** $${(taxStats.total_taxes_collected || 0).toLocaleString()}\\n**Taxpaying Companies:** ${taxStats.taxpaying_companies || 0}\\n**Central Bank Balance:** $${(bankBalance?.closing_balance || 0).toLocaleString()}`, inline: true },
+                    { name: '⏰ Scheduler', value: `**Status:** ${client.economicScheduler?.isProcessing ? '🔄 Processing' : '✅ Active'}\\n**Next Cycle:** ${client.economicScheduler?.getTimeUntilNextCycle() || 'Unknown'}`, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Economic Dashboard' });
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in economy status command:', error);
+            await interaction.reply({
+                content: '❌ There was an error retrieving economic status.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleTriggerCycle(interaction, client) {
+        try {
+            if (!client.economicScheduler) {
+                await interaction.reply({
+                    content: '❌ Economic scheduler not initialized.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            await interaction.deferReply();
+
+            const result = await client.economicScheduler.triggerEconomicCycle();
+
+            const embed = new EmbedBuilder()
+                .setTitle(result.success ? '✅ Economic Cycle Triggered' : '❌ Economic Cycle Failed')
+                .setColor(result.success ? 0x00FF00 : 0xFF0000)
+                .setDescription(result.message)
+                .setTimestamp()
+                .setFooter({ text: 'Economic System Administrator' });
+
+            await interaction.editReply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in trigger cycle command:', error);
+            await interaction.editReply({
+                content: '❌ There was an error triggering the economic cycle.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleDefaultCompanies(interaction, client) {
+        try {
+            const action = interaction.options.getString('action') || 'view';
+
+            if (action === 'reinit') {
+                await interaction.deferReply();
+                
+                if (!client.defaultCompaniesManager) {
+                    await interaction.editReply({
+                        content: '❌ Default companies manager not initialized.',
+                        ephemeral: true
+                    });
+                    return;
+                }
+
+                const result = await client.defaultCompaniesManager.reinitializeDefaults();
+                
+                const embed = new EmbedBuilder()
+                    .setTitle(result.success ? '✅ Default Companies Reinitialized' : '❌ Reinitialization Failed')
+                    .setColor(result.success ? 0x00FF00 : 0xFF0000)
+                    .setDescription(result.message)
+                    .setTimestamp()
+                    .setFooter({ text: 'Default Companies Manager' });
+
+                await interaction.editReply({ embeds: [embed] });
+                return;
+            }
+
+            // View current status
+            const defaultCompanies = await client.defaultCompaniesManager?.getDefaultCompanyInfo() || [];
+
+            if (defaultCompanies.length === 0) {
+                await interaction.reply({
+                    content: '⚠️ No default companies found. Use the reinitialize option to create them.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle('🏛️ Default Admin Companies')
+                .setColor(0x4169E1)
+                .setDescription('Government-controlled companies that provide essential services')
+                .setTimestamp()
+                .setFooter({ text: 'Default Companies Manager' });
+
+            for (const company of defaultCompanies) {
+                const typeEmoji = {
+                    'central_bank': '🏛️',
+                    'insurance': '🛡️',
+                    'stock_exchange': '📈',
+                    'law_firm': '⚖️'
+                };
+
+                embed.addFields({
+                    name: `${typeEmoji[company.company_type] || '🏢'} ${company.name}`,
+                    value: `**Type:** ${company.company_type.replace('_', ' ')}\\n**Industry:** ${company.industry}\\n**Valuation:** $${company.current_valuation.toLocaleString()}\\n**Admin Controlled:** ${company.is_admin_controlled ? 'Yes' : 'No'}`,
+                    inline: true
+                });
+            }
+
+            embed.addFields({
+                name: '🔧 Management',
+                value: 'Use `/admin default_companies reinit` to reinitialize all default companies',
+                inline: false
+            });
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in default companies command:', error);
+            await interaction.reply({
+                content: '❌ There was an error retrieving default company information.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleSchedulerStatus(interaction, client) {
+        try {
+            if (!client.economicScheduler) {
+                await interaction.reply({
+                    content: '❌ Economic scheduler not initialized.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const scheduler = client.economicScheduler;
+            const nextCycleTime = scheduler.getNextCycleTime();
+            const timeUntilNext = scheduler.getTimeUntilNextCycle();
+
+            // Get last completed cycle
+            const lastCycle = await client.db.db.get(`
+                SELECT * FROM economic_cycles 
+                WHERE status = 'completed' 
+                ORDER BY processed_at DESC 
+                LIMIT 1
+            `);
+
+            const embed = new EmbedBuilder()
+                .setTitle('⏰ Economic Scheduler Status')
+                .setColor(scheduler.isProcessing ? 0xFFA500 : 0x00FF00)
+                .addFields(
+                    { name: 'Current Status', value: scheduler.isProcessing ? '🔄 Processing Cycle' : '✅ Active', inline: true },
+                    { name: 'Cycle Interval', value: '24 hours (1 real day = 1 game month)', inline: true },
+                    { name: 'Next Cycle', value: nextCycleTime.toLocaleString(), inline: true },
+                    { name: 'Time Until Next', value: timeUntilNext, inline: true },
+                    { name: 'Last Completed Cycle', value: lastCycle ? lastCycle.cycle_period : 'None', inline: true },
+                    { name: 'Last Processed', value: lastCycle ? new Date(lastCycle.processed_at).toLocaleString() : 'N/A', inline: true }
+                )
+                .setDescription(scheduler.isProcessing 
+                    ? '⚠️ Economic cycle is currently processing. Please wait for completion.' 
+                    : '✅ Scheduler is running normally. Companies will process monthly revenue, taxes, and loan payments automatically.')
+                .setTimestamp()
+                .setFooter({ text: 'Economic Scheduler Dashboard' });
+
+            if (lastCycle) {
+                embed.addFields({
+                    name: '📊 Last Cycle Results',
+                    value: `**Companies Processed:** ${lastCycle.active_companies}\\n**Total Revenue:** $${lastCycle.total_company_revenue.toLocaleString()}\\n**Taxes Collected:** $${lastCycle.total_taxes_collected.toLocaleString()}\\n**Patent Revenue:** $${lastCycle.total_patent_revenue.toLocaleString()}`,
+                    inline: false
+                });
+            }
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in scheduler status command:', error);
+            await interaction.reply({
+                content: '❌ There was an error retrieving scheduler status.',
+                ephemeral: true
+            });
+        }
+    }
+};

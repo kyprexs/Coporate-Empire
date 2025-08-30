@@ -1,0 +1,701 @@
+const { SlashCommandBuilder, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
+module.exports = {
+    data: new SlashCommandBuilder()
+        .setName('research')
+        .setDescription('Research & Development for innovation and technology')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('start')
+                .setDescription('Start a new R&D project')
+                .addStringOption(option =>
+                    option
+                        .setName('company')
+                        .setDescription('Company to start R&D project for')
+                        .setRequired(true)
+                )
+                .addStringOption(option =>
+                    option
+                        .setName('category')
+                        .setDescription('Research category')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: 'Technology Innovation', value: 'technology' },
+                            { name: 'Product Development', value: 'product' },
+                            { name: 'Process Improvement', value: 'process' },
+                            { name: 'Market Research', value: 'market' },
+                            { name: 'Sustainability', value: 'sustainability' },
+                            { name: 'Quality Assurance', value: 'quality' },
+                            { name: 'Cost Optimization', value: 'cost' }
+                        )
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('list')
+                .setDescription('List R&D projects for your companies')
+                .addStringOption(option =>
+                    option
+                        .setName('status')
+                        .setDescription('Filter by project status')
+                        .addChoices(
+                            { name: 'All', value: 'all' },
+                            { name: 'Active', value: 'active' },
+                            { name: 'Completed', value: 'completed' },
+                            { name: 'Cancelled', value: 'cancelled' }
+                        )
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('view')
+                .setDescription('View R&D project details')
+                .addIntegerOption(option =>
+                    option
+                        .setName('project_id')
+                        .setDescription('R&D project ID to view')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('invest')
+                .setDescription('Invest additional funds in an R&D project')
+                .addIntegerOption(option =>
+                    option
+                        .setName('project_id')
+                        .setDescription('R&D project ID')
+                        .setRequired(true)
+                )
+                .addNumberOption(option =>
+                    option
+                        .setName('amount')
+                        .setDescription('Additional investment amount')
+                        .setRequired(true)
+                        .setMinValue(1000)
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('cancel')
+                .setDescription('Cancel an active R&D project')
+                .addIntegerOption(option =>
+                    option
+                        .setName('project_id')
+                        .setDescription('R&D project ID to cancel')
+                        .setRequired(true)
+                )
+        ),
+
+    async execute(interaction, client) {
+        const subcommand = interaction.options.getSubcommand();
+
+        switch (subcommand) {
+            case 'start':
+                await this.handleStart(interaction, client);
+                break;
+            case 'list':
+                await this.handleList(interaction, client);
+                break;
+            case 'view':
+                await this.handleView(interaction, client);
+                break;
+            case 'invest':
+                await this.handleInvest(interaction, client);
+                break;
+            case 'cancel':
+                await this.handleCancel(interaction, client);
+                break;
+        }
+    },
+
+    async handleStart(interaction, client) {
+        try {
+            const companyQuery = interaction.options.getString('company');
+            const category = interaction.options.getString('category');
+
+            // Find the user's company
+            const company = await client.db.getUserCompany(interaction.user.id, companyQuery);
+            if (!company) {
+                await interaction.reply({
+                    content: '❌ Company not found or you don\'t own this company.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if company has sufficient funds for minimum R&D investment
+            const minInvestment = 10000;
+            if (company.cash < minInvestment) {
+                await interaction.reply({
+                    content: `❌ Your company needs at least $${minInvestment.toLocaleString()} to start an R&D project.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Create modal for R&D project details
+            const modal = new ModalBuilder()
+                .setCustomId(`research_start_${company.id}_${category}`)
+                .setTitle(`Start ${this.getCategoryName(category)} Project`);
+
+            const titleInput = new TextInputBuilder()
+                .setCustomId('project_title')
+                .setLabel('Project Title')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('Name for your R&D project')
+                .setRequired(true)
+                .setMaxLength(100);
+
+            const descriptionInput = new TextInputBuilder()
+                .setCustomId('project_description')
+                .setLabel('Project Description')
+                .setStyle(TextInputStyle.Paragraph)
+                .setPlaceholder('What will this R&D project accomplish?')
+                .setRequired(true)
+                .setMaxLength(1000);
+
+            const budgetInput = new TextInputBuilder()
+                .setCustomId('project_budget')
+                .setLabel('Initial Investment ($)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder(`Minimum: $${minInvestment.toLocaleString()}`)
+                .setRequired(true);
+
+            const timelineInput = new TextInputBuilder()
+                .setCustomId('project_timeline')
+                .setLabel('Expected Duration (months)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('How many game months to complete?')
+                .setRequired(true);
+
+            const goalsInput = new TextInputBuilder()
+                .setCustomId('project_goals')
+                .setLabel('Expected Outcomes')
+                .setStyle(TextInputStyle.Paragraph)
+                .setPlaceholder('What benefits do you expect from this research?')
+                .setRequired(false)
+                .setMaxLength(500);
+
+            const firstActionRow = new ActionRowBuilder().addComponents(titleInput);
+            const secondActionRow = new ActionRowBuilder().addComponents(descriptionInput);
+            const thirdActionRow = new ActionRowBuilder().addComponents(budgetInput);
+            const fourthActionRow = new ActionRowBuilder().addComponents(timelineInput);
+            const fifthActionRow = new ActionRowBuilder().addComponents(goalsInput);
+
+            modal.addComponents(firstActionRow, secondActionRow, thirdActionRow, fourthActionRow, fifthActionRow);
+
+            await interaction.showModal(modal);
+
+        } catch (error) {
+            console.error('Error in research start command:', error);
+            await interaction.reply({
+                content: '❌ There was an error starting the R&D project.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleList(interaction, client) {
+        try {
+            const statusFilter = interaction.options.getString('status') || 'all';
+
+            // Get user's companies
+            const companies = await client.db.db.all(`
+                SELECT id FROM companies WHERE owner_id = ? AND status = 'active'
+            `, [interaction.user.id]);
+
+            if (companies.length === 0) {
+                await interaction.reply({
+                    content: '❌ You don\'t own any companies.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const companyIds = companies.map(c => c.id);
+            const placeholders = companyIds.map(() => '?').join(',');
+
+            // Build query based on status filter
+            let whereClause = `WHERE rd.company_id IN (${placeholders})`;
+            const queryParams = [...companyIds];
+
+            if (statusFilter !== 'all') {
+                whereClause += ' AND rd.status = ?';
+                queryParams.push(statusFilter);
+            }
+
+            // Get R&D projects
+            const projects = await client.db.db.all(`
+                SELECT 
+                    rd.*,
+                    c.name as company_name, c.ticker_symbol
+                FROM research_development rd
+                JOIN companies c ON rd.company_id = c.id
+                ${whereClause}
+                ORDER BY rd.start_date DESC
+                LIMIT 20
+            `, queryParams);
+
+            if (projects.length === 0) {
+                await interaction.reply({
+                    content: `📊 No ${statusFilter === 'all' ? '' : statusFilter + ' '}R&D projects found for your companies.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle(`🔬 Your R&D Projects ${statusFilter !== 'all' ? `(${statusFilter})` : ''}`)
+                .setColor(0x9932CC)
+                .setDescription(`Found ${projects.length} R&D project${projects.length !== 1 ? 's' : ''}`)
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire R&D Department' });
+
+            let projectList = '';
+            projects.forEach((project, index) => {
+                const statusIcon = this.getProjectStatusIcon(project.status);
+                const categoryIcon = this.getCategoryIcon(project.category);
+                const progress = this.calculateProgress(project);
+                
+                projectList += `${statusIcon} **ID: ${project.id}** ${categoryIcon} ${project.project_name}\\n`;
+                projectList += `**${project.company_name}** • ${this.getCategoryName(project.category)}\\n`;
+                projectList += `Budget: $${project.budget.toLocaleString()} • Progress: ${progress.toFixed(1)}%\\n`;
+                projectList += `Started: <t:${Math.floor(new Date(project.start_date).getTime() / 1000)}:R>\\n\\n`;
+            });
+
+            embed.addFields({
+                name: 'R&D Projects',
+                value: projectList,
+                inline: false
+            });
+
+            // Create action buttons
+            const actionRow = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('research_active')
+                        .setLabel('🔬 Active')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId('research_completed')
+                        .setLabel('✅ Completed')
+                        .setStyle(ButtonStyle.Success),
+                    new ButtonBuilder()
+                        .setCustomId('research_all')
+                        .setLabel('📊 All')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+
+            await interaction.reply({ embeds: [embed], components: [actionRow] });
+
+        } catch (error) {
+            console.error('Error in research list command:', error);
+            await interaction.reply({
+                content: '❌ There was an error listing R&D projects.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleView(interaction, client) {
+        try {
+            const projectId = interaction.options.getInteger('project_id');
+
+            // Get project details
+            const project = await client.db.db.get(`
+                SELECT 
+                    rd.*,
+                    c.name as company_name, c.ticker_symbol, c.owner_id,
+                    u.username as owner_username
+                FROM research_development rd
+                JOIN companies c ON rd.company_id = c.id
+                JOIN users u ON c.owner_id = u.discord_id
+                WHERE rd.id = ?
+            `, [projectId]);
+
+            if (!project) {
+                await interaction.reply({
+                    content: '❌ R&D project not found.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if user owns the company
+            if (project.owner_id !== interaction.user.id) {
+                await interaction.reply({
+                    content: '❌ You can only view R&D projects for companies you own.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const statusIcon = this.getProjectStatusIcon(project.status);
+            const categoryIcon = this.getCategoryIcon(project.category);
+            const progress = this.calculateProgress(project);
+
+            const embed = new EmbedBuilder()
+                .setTitle(`${categoryIcon} R&D Project #${project.id}: ${project.project_name}`)
+                .setColor(this.getProjectStatusColor(project.status))
+                .setDescription(project.description)
+                .addFields(
+                    { name: 'Status', value: `${statusIcon} ${project.status.charAt(0).toUpperCase() + project.status.slice(1)}`, inline: true },
+                    { name: 'Category', value: this.getCategoryName(project.category), inline: true },
+                    { name: 'Progress', value: `${progress.toFixed(1)}%`, inline: true },
+                    { name: 'Company', value: `${project.company_name} (${project.ticker_symbol || 'Private'})`, inline: true },
+                    { name: 'Budget', value: `$${project.budget.toLocaleString()}`, inline: true },
+                    { name: 'Expected Duration', value: `${project.estimated_duration_months} months`, inline: true },
+                    { name: 'Started', value: `<t:${Math.floor(new Date(project.start_date).getTime() / 1000)}:D>`, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire R&D Department' });
+
+            if (project.completion_date) {
+                embed.addFields({
+                    name: 'Completed', 
+                    value: `<t:${Math.floor(new Date(project.completion_date).getTime() / 1000)}:D>`, 
+                    inline: true
+                });
+            } else if (project.status === 'active') {
+                const expectedCompletion = new Date(project.start_date);
+                expectedCompletion.setMonth(expectedCompletion.getMonth() + project.estimated_duration_months);
+                embed.addFields({
+                    name: 'Expected Completion', 
+                    value: `<t:${Math.floor(expectedCompletion.getTime() / 1000)}:D>`, 
+                    inline: true
+                });
+            }
+
+            if (project.expected_outcomes) {
+                embed.addFields({
+                    name: '🎯 Expected Outcomes',
+                    value: project.expected_outcomes,
+                    inline: false
+                });
+            }
+
+            if (project.results && project.status === 'completed') {
+                embed.addFields({
+                    name: '🏆 Results Achieved',
+                    value: project.results,
+                    inline: false
+                });
+            }
+
+            // Create action buttons based on project status
+            const actionRow = new ActionRowBuilder();
+
+            if (project.status === 'active') {
+                actionRow.addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`research_invest_${project.id}`)
+                        .setLabel('💰 Additional Investment')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId(`research_cancel_${project.id}`)
+                        .setLabel('❌ Cancel Project')
+                        .setStyle(ButtonStyle.Danger)
+                );
+            }
+
+            const components = actionRow.components.length > 0 ? [actionRow] : [];
+            await interaction.reply({ embeds: [embed], components });
+
+        } catch (error) {
+            console.error('Error in research view command:', error);
+            await interaction.reply({
+                content: '❌ There was an error viewing the R&D project.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleInvest(interaction, client) {
+        try {
+            const projectId = interaction.options.getInteger('project_id');
+            const amount = interaction.options.getNumber('amount');
+
+            // Get project details
+            const project = await client.db.db.get(`
+                SELECT 
+                    rd.*,
+                    c.name as company_name, c.cash, c.owner_id
+                FROM research_development rd
+                JOIN companies c ON rd.company_id = c.id
+                WHERE rd.id = ? AND rd.status = 'active'
+            `, [projectId]);
+
+            if (!project) {
+                await interaction.reply({
+                    content: '❌ Active R&D project not found.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if user owns the company
+            if (project.owner_id !== interaction.user.id) {
+                await interaction.reply({
+                    content: '❌ You can only invest in R&D projects for companies you own.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if company has sufficient funds
+            if (project.cash < amount) {
+                await interaction.reply({
+                    content: `❌ ${project.company_name} doesn't have enough cash. Available: $${project.cash.toLocaleString()}`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Process additional investment
+            await client.db.db.run('BEGIN TRANSACTION');
+
+            try {
+                // Update project budget
+                await client.db.db.run(`
+                    UPDATE research_development 
+                    SET budget = budget + ?
+                    WHERE id = ?
+                `, [amount, projectId]);
+
+                // Deduct from company cash
+                await client.db.db.run(`
+                    UPDATE companies 
+                    SET cash = cash - ?
+                    WHERE id = ?
+                `, [amount, project.company_id]);
+
+                await client.db.db.run('COMMIT');
+
+                const newBudget = project.budget + amount;
+                const embed = new EmbedBuilder()
+                    .setTitle('💰 R&D Investment Successful!')
+                    .setColor(0x32CD32)
+                    .addFields(
+                        { name: 'Project', value: `#${project.id}: ${project.project_name}`, inline: true },
+                        { name: 'Additional Investment', value: `$${amount.toLocaleString()}`, inline: true },
+                        { name: 'New Total Budget', value: `$${newBudget.toLocaleString()}`, inline: true },
+                        { name: 'Company', value: project.company_name, inline: true },
+                        { name: 'Remaining Cash', value: `$${(project.cash - amount).toLocaleString()}`, inline: true }
+                    )
+                    .setDescription('💡 Additional funding will accelerate research progress and improve outcomes!')
+                    .setTimestamp()
+                    .setFooter({ text: 'Corporate Empire R&D Department' });
+
+                await interaction.reply({ embeds: [embed] });
+
+            } catch (error) {
+                await client.db.db.run('ROLLBACK');
+                throw error;
+            }
+
+        } catch (error) {
+            console.error('Error in research invest command:', error);
+            await interaction.reply({
+                content: '❌ There was an error processing the R&D investment.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleCancel(interaction, client) {
+        try {
+            const projectId = interaction.options.getInteger('project_id');
+
+            // Get project details
+            const project = await client.db.db.get(`
+                SELECT 
+                    rd.*,
+                    c.name as company_name, c.owner_id
+                FROM research_development rd
+                JOIN companies c ON rd.company_id = c.id
+                WHERE rd.id = ? AND rd.status = 'active'
+            `, [projectId]);
+
+            if (!project) {
+                await interaction.reply({
+                    content: '❌ Active R&D project not found.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if user owns the company
+            if (project.owner_id !== interaction.user.id) {
+                await interaction.reply({
+                    content: '❌ You can only cancel R&D projects for companies you own.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Cancel the project (partial refund)
+            const refundAmount = Math.floor(project.budget * 0.3); // 30% refund
+
+            await client.db.db.run('BEGIN TRANSACTION');
+
+            try {
+                // Update project status
+                await client.db.db.run(`
+                    UPDATE research_development 
+                    SET status = 'cancelled', completion_date = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                `, [projectId]);
+
+                // Refund partial amount to company
+                if (refundAmount > 0) {
+                    await client.db.db.run(`
+                        UPDATE companies 
+                        SET cash = cash + ?
+                        WHERE id = ?
+                    `, [refundAmount, project.company_id]);
+                }
+
+                await client.db.db.run('COMMIT');
+
+                const embed = new EmbedBuilder()
+                    .setTitle('❌ R&D Project Cancelled')
+                    .setColor(0xFF6B6B)
+                    .addFields(
+                        { name: 'Project', value: `#${project.id}: ${project.project_name}`, inline: true },
+                        { name: 'Original Budget', value: `$${project.budget.toLocaleString()}`, inline: true },
+                        { name: 'Refund (30%)', value: `$${refundAmount.toLocaleString()}`, inline: true }
+                    )
+                    .setDescription('The R&D project has been cancelled. A partial refund has been credited to your company.')
+                    .setTimestamp()
+                    .setFooter({ text: 'Corporate Empire R&D Department' });
+
+                await interaction.reply({ embeds: [embed] });
+
+            } catch (error) {
+                await client.db.db.run('ROLLBACK');
+                throw error;
+            }
+
+        } catch (error) {
+            console.error('Error in research cancel command:', error);
+            await interaction.reply({
+                content: '❌ There was an error cancelling the R&D project.',
+                ephemeral: true
+            });
+        }
+    },
+
+    calculateProgress(project) {
+        if (project.status === 'completed') return 100;
+        if (project.status === 'cancelled') return 0;
+
+        const startDate = new Date(project.start_date);
+        const now = new Date();
+        const monthsElapsed = (now.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
+        
+        const baseProgress = Math.min(monthsElapsed / project.estimated_duration_months * 100, 100);
+        
+        // Budget boost: higher budget increases progress rate
+        const budgetBoost = Math.min(project.budget / 50000, 2); // Max 2x boost at $50k budget
+        
+        return Math.min(baseProgress * budgetBoost, 100);
+    },
+
+    getCategoryName(category) {
+        const categories = {
+            'technology': 'Technology Innovation',
+            'product': 'Product Development',
+            'process': 'Process Improvement',
+            'market': 'Market Research',
+            'sustainability': 'Sustainability',
+            'quality': 'Quality Assurance',
+            'cost': 'Cost Optimization'
+        };
+        return categories[category] || category;
+    },
+
+    getCategoryIcon(category) {
+        const icons = {
+            'technology': '💻',
+            'product': '📱',
+            'process': '⚙️',
+            'market': '📊',
+            'sustainability': '🌱',
+            'quality': '🏆',
+            'cost': '💵'
+        };
+        return icons[category] || '🔬';
+    },
+
+    getProjectStatusIcon(status) {
+        const icons = {
+            'active': '🔬',
+            'completed': '✅',
+            'cancelled': '❌'
+        };
+        return icons[status] || '📊';
+    },
+
+    getProjectStatusColor(status) {
+        const colors = {
+            'active': 0x9932CC,
+            'completed': 0x32CD32,
+            'cancelled': 0xFF6B6B
+        };
+        return colors[status] || 0x9932CC;
+    },
+
+    async processRDCompletion(client, project) {
+        try {
+            // Calculate R&D benefits based on category and budget
+            const benefits = this.calculateRDBenefits(project);
+
+            // Apply benefits to the company
+            await client.db.db.run(`
+                UPDATE companies 
+                SET current_valuation = current_valuation * ?,
+                    efficiency_rating = efficiency_rating * ?
+                WHERE id = ?
+            `, [benefits.valuationMultiplier, benefits.efficiencyMultiplier, project.company_id]);
+
+            // Mark project as completed with results
+            await client.db.db.run(`
+                UPDATE research_development 
+                SET status = 'completed', 
+                    completion_date = CURRENT_TIMESTAMP,
+                    results = ?
+                WHERE id = ?
+            `, [benefits.description, project.id]);
+
+            return benefits;
+
+        } catch (error) {
+            console.error('Error processing R&D completion:', error);
+            return null;
+        }
+    },
+
+    calculateRDBenefits(project) {
+        const baseBenefits = {
+            'technology': { valuationMultiplier: 1.15, efficiencyMultiplier: 1.20 },
+            'product': { valuationMultiplier: 1.20, efficiencyMultiplier: 1.10 },
+            'process': { valuationMultiplier: 1.10, efficiencyMultiplier: 1.25 },
+            'market': { valuationMultiplier: 1.12, efficiencyMultiplier: 1.15 },
+            'sustainability': { valuationMultiplier: 1.18, efficiencyMultiplier: 1.12 },
+            'quality': { valuationMultiplier: 1.16, efficiencyMultiplier: 1.18 },
+            'cost': { valuationMultiplier: 1.08, efficiencyMultiplier: 1.30 }
+        };
+
+        const base = baseBenefits[project.category] || { valuationMultiplier: 1.10, efficiencyMultiplier: 1.10 };
+        
+        // Budget impact (higher budget = better results)
+        const budgetMultiplier = Math.min(1 + (project.budget / 100000), 1.5); // Max 1.5x boost
+        
+        return {
+            valuationMultiplier: base.valuationMultiplier * budgetMultiplier,
+            efficiencyMultiplier: base.efficiencyMultiplier * budgetMultiplier,
+            description: `Successful ${this.getCategoryName(project.category)} project! Company valuation increased by ${((base.valuationMultiplier * budgetMultiplier - 1) * 100).toFixed(1)}% and efficiency improved by ${((base.efficiencyMultiplier * budgetMultiplier - 1) * 100).toFixed(1)}%.`
+        };
+    }
+};

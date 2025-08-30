@@ -1,0 +1,451 @@
+const { SlashCommandBuilder, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+
+module.exports = {
+    data: new SlashCommandBuilder()
+        .setName('patent')
+        .setDescription('Manage patents and intellectual property')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('submit')
+                .setDescription('Submit a patent application')
+                .addStringOption(option =>
+                    option
+                        .setName('company')
+                        .setDescription('Company name or ticker symbol')
+                        .setRequired(true)
+                )
+                .addStringOption(option =>
+                    option
+                        .setName('type')
+                        .setDescription('Type of patent')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: 'Utility Patent (inventions, processes)', value: 'utility' },
+                            { name: 'Design Patent (appearance, aesthetics)', value: 'design' },
+                            { name: 'Software Patent (algorithms, systems)', value: 'software' }
+                        )
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('list')
+                .setDescription('List company patents')
+                .addStringOption(option =>
+                    option
+                        .setName('company')
+                        .setDescription('Company name or ticker symbol')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('approve')
+                .setDescription('Approve a pending patent (Admin only)')
+                .addIntegerOption(option =>
+                    option
+                        .setName('patent_id')
+                        .setDescription('Patent ID to approve')
+                        .setRequired(true)
+                )
+                .addNumberOption(option =>
+                    option
+                        .setName('monthly_revenue')
+                        .setDescription('Monthly revenue this patent will generate')
+                        .setRequired(false)
+                        .setMinValue(1000)
+                        .setMaxValue(50000)
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('reject')
+                .setDescription('Reject a pending patent (Admin only)')
+                .addIntegerOption(option =>
+                    option
+                        .setName('patent_id')
+                        .setDescription('Patent ID to reject')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('pending')
+                .setDescription('List all pending patents (Admin only)')
+        ),
+
+    async execute(interaction, client) {
+        const subcommand = interaction.options.getSubcommand();
+
+        switch (subcommand) {
+            case 'submit':
+                await this.handleSubmit(interaction, client);
+                break;
+            case 'list':
+                await this.handleList(interaction, client);
+                break;
+            case 'approve':
+                await this.handleApprove(interaction, client);
+                break;
+            case 'reject':
+                await this.handleReject(interaction, client);
+                break;
+            case 'pending':
+                await this.handlePending(interaction, client);
+                break;
+        }
+    },
+
+    async handleSubmit(interaction, client) {
+        try {
+            const companyQuery = interaction.options.getString('company');
+            const patentType = interaction.options.getString('type');
+
+            // Find the company
+            const company = await client.db.db.get(`
+                SELECT c.*, u.username as owner_username 
+                FROM companies c
+                JOIN users u ON c.owner_id = u.discord_id
+                WHERE (LOWER(c.name) LIKE LOWER(?) OR LOWER(c.ticker_symbol) LIKE LOWER(?))
+                AND c.status = 'active'
+            `, [`%${companyQuery}%`, `%${companyQuery}%`]);
+
+            if (!company) {
+                await interaction.reply({
+                    content: '❌ No active company found with that name or ticker symbol.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if user owns the company
+            if (company.owner_id !== interaction.user.id) {
+                await interaction.reply({
+                    content: '❌ You can only submit patents for companies you own.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Create modal for patent details
+            const modal = new ModalBuilder()
+                .setCustomId(`patent_submit_${company.id}_${patentType}`)
+                .setTitle(`Submit ${patentType.charAt(0).toUpperCase() + patentType.slice(1)} Patent`);
+
+            const titleInput = new TextInputBuilder()
+                .setCustomId('patent_title')
+                .setLabel('Patent Title')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('Enter a clear, descriptive title for your invention')
+                .setRequired(true)
+                .setMaxLength(100);
+
+            const descriptionInput = new TextInputBuilder()
+                .setCustomId('patent_description')
+                .setLabel('Patent Description')
+                .setStyle(TextInputStyle.Paragraph)
+                .setPlaceholder('Detailed description of your invention, its purpose, and how it works')
+                .setRequired(true)
+                .setMaxLength(2000);
+
+            const row1 = new ActionRowBuilder().addComponents(titleInput);
+            const row2 = new ActionRowBuilder().addComponents(descriptionInput);
+
+            modal.addComponents(row1, row2);
+            await interaction.showModal(modal);
+
+        } catch (error) {
+            console.error('Error in patent submit command:', error);
+            await interaction.reply({
+                content: '❌ There was an error processing your patent application.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleList(interaction, client) {
+        try {
+            const companyQuery = interaction.options.getString('company');
+
+            // Find the company
+            const company = await client.db.db.get(`
+                SELECT c.*, u.username as owner_username 
+                FROM companies c
+                JOIN users u ON c.owner_id = u.discord_id
+                WHERE (LOWER(c.name) LIKE LOWER(?) OR LOWER(c.ticker_symbol) LIKE LOWER(?))
+                AND c.status = 'active'
+            `, [`%${companyQuery}%`, `%${companyQuery}%`]);
+
+            if (!company) {
+                await interaction.reply({
+                    content: '❌ No active company found with that name or ticker symbol.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Get company patents
+            const patents = await client.db.getCompanyPatents(company.id);
+
+            if (patents.length === 0) {
+                await interaction.reply({
+                    content: `📋 ${company.name} has no patents. Use \`/patent submit\` to file your first patent!`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle(`📋 ${company.name} - Patents`)
+                .setColor(0x9370DB)
+                .setDescription(`Total Patents: ${patents.length}`)
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Bot' });
+
+            // Calculate total monthly patent revenue
+            let totalMonthlyRevenue = 0;
+            let approvedCount = 0;
+
+            for (const patent of patents.slice(0, 10)) { // Limit to 10 for embed space
+                if (patent.status === 'approved') {
+                    totalMonthlyRevenue += patent.monthly_revenue;
+                    approvedCount++;
+                }
+
+                const statusEmoji = {
+                    'pending': '⏳',
+                    'approved': '✅',
+                    'rejected': '❌',
+                    'expired': '⏰'
+                };
+
+                const patentValue = patent.status === 'approved' 
+                    ? `**Status:** ${statusEmoji[patent.status] || '❓'} ${patent.status}\\n**Monthly Revenue:** $${patent.monthly_revenue.toLocaleString()}\\n**Approved:** ${new Date(patent.approval_date).toLocaleDateString()}\\n**Expires:** ${new Date(patent.expiry_date).toLocaleDateString()}`
+                    : `**Status:** ${statusEmoji[patent.status] || '❓'} ${patent.status}\\n**Filed:** ${new Date(patent.filing_date).toLocaleDateString()}`;
+
+                embed.addFields({
+                    name: `${patent.title} (${patent.patent_type})`,
+                    value: patentValue,
+                    inline: true
+                });
+            }
+
+            if (patents.length > 10) {
+                embed.addFields({
+                    name: 'ℹ️ Note',
+                    value: `Showing first 10 patents. Total: ${patents.length}`,
+                    inline: false
+                });
+            }
+
+            embed.addFields({
+                name: '💰 Patent Portfolio Summary',
+                value: `**Approved Patents:** ${approvedCount}\\n**Total Monthly Revenue:** $${totalMonthlyRevenue.toLocaleString()}`,
+                inline: false
+            });
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in list patents command:', error);
+            await interaction.reply({
+                content: '❌ There was an error retrieving patent information.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleApprove(interaction, client) {
+        try {
+            // Check if user is admin
+            if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
+                await interaction.reply({
+                    content: '❌ This command is only available to administrators.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const patentId = interaction.options.getInteger('patent_id');
+            const monthlyRevenue = interaction.options.getNumber('monthly_revenue') || 5000;
+
+            // Get patent details
+            const patent = await client.db.db.get(`
+                SELECT p.*, c.name as company_name, c.owner_id
+                FROM patents p
+                JOIN companies c ON p.company_id = c.id
+                WHERE p.id = ? AND p.status = 'pending'
+            `, [patentId]);
+
+            if (!patent) {
+                await interaction.reply({
+                    content: '❌ Patent not found or not pending approval.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Approve the patent
+            await client.db.approvePatent(patentId, interaction.user.id, monthlyRevenue);
+
+            const embed = new EmbedBuilder()
+                .setTitle('✅ Patent Approved')
+                .setColor(0x00FF00)
+                .addFields(
+                    { name: 'Patent Title', value: patent.title, inline: false },
+                    { name: 'Company', value: patent.company_name, inline: true },
+                    { name: 'Type', value: patent.patent_type, inline: true },
+                    { name: 'Monthly Revenue', value: `$${monthlyRevenue.toLocaleString()}`, inline: true },
+                    { name: 'Approved By', value: interaction.user.username, inline: true },
+                    { name: 'Valid Until', value: new Date(Date.now() + (20 * 365 * 24 * 60 * 60 * 1000)).toLocaleDateString(), inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Bot' });
+
+            await interaction.reply({ embeds: [embed] });
+
+            // Notify the company owner
+            try {
+                const owner = await interaction.guild.members.fetch(patent.owner_id);
+                if (owner) {
+                    const notificationEmbed = new EmbedBuilder()
+                        .setTitle('🎉 Patent Approved!')
+                        .setColor(0x00FF00)
+                        .addFields(
+                            { name: 'Patent', value: patent.title, inline: true },
+                            { name: 'Company', value: patent.company_name, inline: true },
+                            { name: 'Monthly Revenue', value: `$${monthlyRevenue.toLocaleString()}`, inline: true }
+                        )
+                        .setDescription('Congratulations! Your patent has been approved and will start generating revenue in the next monthly cycle.')
+                        .setTimestamp();
+
+                    await owner.send({ embeds: [notificationEmbed] });
+                }
+            } catch (dmError) {
+                console.log('Could not send DM to patent owner:', dmError.message);
+            }
+
+        } catch (error) {
+            console.error('Error in approve patent command:', error);
+            await interaction.reply({
+                content: '❌ There was an error approving the patent.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleReject(interaction, client) {
+        try {
+            // Check if user is admin
+            if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
+                await interaction.reply({
+                    content: '❌ This command is only available to administrators.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const patentId = interaction.options.getInteger('patent_id');
+
+            // Get patent details and reject it
+            const patent = await client.db.db.get(`
+                SELECT p.*, c.name as company_name, c.owner_id
+                FROM patents p
+                JOIN companies c ON p.company_id = c.id
+                WHERE p.id = ? AND p.status = 'pending'
+            `, [patentId]);
+
+            if (!patent) {
+                await interaction.reply({
+                    content: '❌ Patent not found or not pending approval.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Update patent status
+            await client.db.db.run('UPDATE patents SET status = \"rejected\" WHERE id = ?', [patentId]);
+
+            const embed = new EmbedBuilder()
+                .setTitle('❌ Patent Rejected')
+                .setColor(0xFF0000)
+                .addFields(
+                    { name: 'Patent Title', value: patent.title, inline: false },
+                    { name: 'Company', value: patent.company_name, inline: true },
+                    { name: 'Type', value: patent.patent_type, inline: true },
+                    { name: 'Rejected By', value: interaction.user.username, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Bot' });
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in reject patent command:', error);
+            await interaction.reply({
+                content: '❌ There was an error rejecting the patent.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handlePending(interaction, client) {
+        try {
+            // Check if user is admin
+            if (!interaction.member.roles.cache.has(process.env.ADMIN_ROLE_ID)) {
+                await interaction.reply({
+                    content: '❌ This command is only available to administrators.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const pendingPatents = await client.db.getPendingPatents();
+
+            if (pendingPatents.length === 0) {
+                await interaction.reply({
+                    content: '📋 No pending patents found.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle('⏳ Pending Patents')
+                .setColor(0xFFA500)
+                .setDescription(`${pendingPatents.length} patent(s) awaiting review`)
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Bot' });
+
+            for (const patent of pendingPatents.slice(0, 10)) {
+                embed.addFields({
+                    name: `ID: ${patent.id} - ${patent.title}`,
+                    value: `**Company:** ${patent.company_name}\\n**Type:** ${patent.patent_type}\\n**Filed:** ${new Date(patent.filing_date).toLocaleDateString()}\\n**Description:** ${patent.description.substring(0, 100)}${patent.description.length > 100 ? '...' : ''}`,
+                    inline: true
+                });
+            }
+
+            if (pendingPatents.length > 10) {
+                embed.addFields({
+                    name: 'ℹ️ Note',
+                    value: `Showing first 10 patents. Total pending: ${pendingPatents.length}`,
+                    inline: false
+                });
+            }
+
+            embed.addFields({
+                name: '🔧 Admin Actions',
+                value: '• `/patent approve <id> [revenue]` - Approve patent\\n• `/patent reject <id>` - Reject patent',
+                inline: false
+            });
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in pending patents command:', error);
+            await interaction.reply({
+                content: '❌ There was an error retrieving pending patents.',
+                ephemeral: true
+            });
+        }
+    }
+};

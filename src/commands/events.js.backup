@@ -1,0 +1,598 @@
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
+module.exports = {
+    data: new SlashCommandBuilder()
+        .setName('events')
+        .setDescription('Market events and economic cycles')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('current')
+                .setDescription('View current active market events')
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('history')
+                .setDescription('View past market events')
+                .addIntegerOption(option =>
+                    option
+                        .setName('limit')
+                        .setDescription('Number of events to show (default: 10)')
+                        .setMinValue(1)
+                        .setMaxValue(50)
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('impact')
+                .setDescription('View how market events affected your companies')
+                .addStringOption(option =>
+                    option
+                        .setName('company')
+                        .setDescription('Company name or ticker symbol (optional)')
+                )
+        ),
+
+    async execute(interaction, client) {
+        const subcommand = interaction.options.getSubcommand();
+
+        switch (subcommand) {
+            case 'current':
+                await this.handleCurrent(interaction, client);
+                break;
+            case 'history':
+                await this.handleHistory(interaction, client);
+                break;
+            case 'impact':
+                await this.handleImpact(interaction, client);
+                break;
+        }
+    },
+
+    async handleCurrent(interaction, client) {
+        try {
+            // Get current active events
+            const activeEvents = await client.db.db.all(`
+                SELECT 
+                    me.*,
+                    ec.name as cycle_name, ec.description as cycle_description
+                FROM market_events me
+                LEFT JOIN economic_cycles ec ON me.economic_cycle_id = ec.id
+                WHERE me.is_active = 1
+                ORDER BY me.start_date DESC
+            `);
+
+            const embed = new EmbedBuilder()
+                .setTitle('📈 Current Market Events')
+                .setColor(0xFF6600)
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Economic Monitor' });
+
+            if (activeEvents.length === 0) {
+                embed.setDescription('🌤️ No major market events currently active. Markets are operating normally.');
+                embed.setColor(0x32CD32);
+            } else {
+                let eventsText = '';
+                activeEvents.forEach(event => {
+                    const icon = this.getEventIcon(event.event_type);
+                    const severity = this.getSeverityIcon(event.severity);
+                    
+                    eventsText += `${icon} **${event.event_name}** ${severity}\\n`;
+                    eventsText += `${event.description}\\n`;
+                    
+                    if (event.affected_industries) {
+                        eventsText += `🎯 **Affected Industries:** ${event.affected_industries}\\n`;
+                    }
+                    
+                    eventsText += `📊 **Impact:** ${event.impact_multiplier}x multiplier\\n`;
+                    eventsText += `⏰ **Started:** <t:${Math.floor(new Date(event.start_date).getTime() / 1000)}:R>\\n`;
+                    
+                    if (event.end_date) {
+                        eventsText += `⏳ **Ends:** <t:${Math.floor(new Date(event.end_date).getTime() / 1000)}:R>\\n`;
+                    }
+                    
+                    eventsText += '\\n';
+                });
+
+                embed.setDescription('🚨 **Active Market Events**\\n\\nThese events are currently affecting the economy:');
+                embed.addFields({
+                    name: 'Active Events',
+                    value: eventsText,
+                    inline: false
+                });
+            }
+
+            // Get current economic cycle
+            const currentCycle = await client.db.db.get(`
+                SELECT * FROM economic_cycles 
+                WHERE is_active = 1 
+                ORDER BY start_date DESC 
+                LIMIT 1
+            `);
+
+            if (currentCycle) {
+                embed.addFields({
+                    name: '🔄 Current Economic Cycle',
+                    value: `**${currentCycle.name}**\\n${currentCycle.description}\\nMultiplier: ${currentCycle.cycle_multiplier}x\\nStarted: <t:${Math.floor(new Date(currentCycle.start_date).getTime() / 1000)}:R>`,
+                    inline: false
+                });
+            }
+
+            // Create action buttons
+            const actionRow = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('events_refresh')
+                        .setLabel('🔄 Refresh')
+                        .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                        .setCustomId('events_history')
+                        .setLabel('📚 History')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId('events_impact')
+                        .setLabel('📊 Impact Analysis')
+                        .setStyle(ButtonStyle.Success)
+                );
+
+            await interaction.reply({ embeds: [embed], components: [actionRow] });
+
+        } catch (error) {
+            console.error('Error in events current command:', error);
+            await interaction.reply({
+                content: '❌ There was an error retrieving current market events.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleHistory(interaction, client) {
+        try {
+            const limit = interaction.options.getInteger('limit') || 10;
+
+            // Get historical events
+            const events = await client.db.db.all(`
+                SELECT 
+                    me.*,
+                    ec.name as cycle_name
+                FROM market_events me
+                LEFT JOIN economic_cycles ec ON me.economic_cycle_id = ec.id
+                ORDER BY me.start_date DESC
+                LIMIT ?
+            `, [limit]);
+
+            const embed = new EmbedBuilder()
+                .setTitle('📚 Market Events History')
+                .setColor(0x0099FF)
+                .setDescription(`Showing last ${events.length} market events`)
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Economic Archive' });
+
+            if (events.length === 0) {
+                embed.setDescription('📭 No market events found in the historical record.');
+            } else {
+                let eventsText = '';
+                events.forEach((event, index) => {
+                    const icon = this.getEventIcon(event.event_type);
+                    const severity = this.getSeverityIcon(event.severity);
+                    const status = event.is_active ? '🔴 Active' : '⚪ Ended';
+                    
+                    eventsText += `${icon} **${event.event_name}** ${severity} ${status}\\n`;
+                    eventsText += `${event.description}\\n`;
+                    eventsText += `📊 Impact: ${event.impact_multiplier}x • `;
+                    eventsText += `📅 ${new Date(event.start_date).toLocaleDateString()}`;
+                    
+                    if (event.end_date && !event.is_active) {
+                        eventsText += ` - ${new Date(event.end_date).toLocaleDateString()}`;
+                    }
+                    
+                    eventsText += '\\n\\n';
+                });
+
+                embed.addFields({
+                    name: 'Historical Events',
+                    value: eventsText,
+                    inline: false
+                });
+            }
+
+            // Get economic cycle history
+            const cycles = await client.db.db.all(`
+                SELECT * FROM economic_cycles 
+                ORDER BY start_date DESC 
+                LIMIT 5
+            `);
+
+            if (cycles.length > 0) {
+                let cyclesText = '';
+                cycles.forEach(cycle => {
+                    const status = cycle.is_active ? '🔴 Current' : '⚪ Past';
+                    cyclesText += `**${cycle.name}** ${status}\\n`;
+                    cyclesText += `${cycle.description}\\n`;
+                    cyclesText += `📊 ${cycle.cycle_multiplier}x • 📅 ${new Date(cycle.start_date).toLocaleDateString()}\\n\\n`;
+                });
+
+                embed.addFields({
+                    name: '🔄 Economic Cycles',
+                    value: cyclesText,
+                    inline: false
+                });
+            }
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in events history command:', error);
+            await interaction.reply({
+                content: '❌ There was an error retrieving market events history.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleImpact(interaction, client) {
+        try {
+            const companyQuery = interaction.options.getString('company');
+
+            // Get user's companies
+            let companies;
+            if (companyQuery) {
+                const company = await client.db.getUserCompany(interaction.user.id, companyQuery);
+                if (!company) {
+                    await interaction.reply({
+                        content: '❌ Company not found or you don\'t own this company.',
+                        ephemeral: true
+                    });
+                    return;
+                }
+                companies = [company];
+            } else {
+                companies = await client.db.db.all(`
+                    SELECT * FROM companies 
+                    WHERE owner_id = ? AND status = 'active'
+                `, [interaction.user.id]);
+
+                if (companies.length === 0) {
+                    await interaction.reply({
+                        content: '❌ You don\'t own any companies.',
+                        ephemeral: true
+                    });
+                    return;
+                }
+            }
+
+            // Get recent events that could have affected companies
+            const recentEvents = await client.db.db.all(`
+                SELECT * FROM market_events 
+                WHERE start_date > datetime('now', '-30 days')
+                ORDER BY start_date DESC
+            `);
+
+            const embed = new EmbedBuilder()
+                .setTitle(`📊 Market Events Impact Analysis`)
+                .setColor(0x9932CC)
+                .setDescription(companies.length === 1 ? 
+                    `Impact analysis for **${companies[0].name}**` : 
+                    `Impact analysis for your ${companies.length} companies`)
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Impact Analysis' });
+
+            if (recentEvents.length === 0) {
+                embed.addFields({
+                    name: '📈 Market Stability',
+                    value: 'No significant market events in the last 30 days. Your companies have been operating in stable conditions.',
+                    inline: false
+                });
+            } else {
+                // Analyze impact for each company
+                let impactAnalysis = '';
+                
+                companies.forEach(company => {
+                    let companyImpacts = [];
+                    
+                    recentEvents.forEach(event => {
+                        const impact = this.calculateEventImpact(event, company);
+                        if (impact.affected) {
+                            companyImpacts.push(impact);
+                        }
+                    });
+
+                    if (companyImpacts.length > 0) {
+                        impactAnalysis += `🏢 **${company.name}**\\n`;
+                        
+                        companyImpacts.forEach(impact => {
+                            const icon = impact.positive ? '📈' : '📉';
+                            impactAnalysis += `${icon} ${impact.eventName}: ${impact.description}\\n`;
+                        });
+                        
+                        impactAnalysis += '\\n';
+                    } else {
+                        impactAnalysis += `🏢 **${company.name}**: No significant market event impacts\\n\\n`;
+                    }
+                });
+
+                embed.addFields({
+                    name: '🎯 Company Impact Analysis',
+                    value: impactAnalysis || 'No impacts detected',
+                    inline: false
+                });
+
+                // Overall market sentiment
+                const positiveEvents = recentEvents.filter(e => e.impact_multiplier > 1).length;
+                const negativeEvents = recentEvents.filter(e => e.impact_multiplier < 1).length;
+                
+                let sentiment = '😐 Neutral';
+                if (positiveEvents > negativeEvents) sentiment = '😊 Positive';
+                else if (negativeEvents > positiveEvents) sentiment = '😰 Negative';
+
+                embed.addFields({
+                    name: '📊 Market Sentiment (30 days)',
+                    value: `${sentiment}\\n📈 Positive Events: ${positiveEvents}\\n📉 Negative Events: ${negativeEvents}`,
+                    inline: true
+                });
+            }
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in events impact command:', error);
+            await interaction.reply({
+                content: '❌ There was an error analyzing market event impacts.',
+                ephemeral: true
+            });
+        }
+    },
+
+    calculateEventImpact(event, company) {
+        // Check if company is affected by this event
+        let affected = false;
+        let description = '';
+        let positive = event.impact_multiplier > 1;
+
+        // Check industry targeting
+        if (event.affected_industries) {
+            const industries = event.affected_industries.split(',').map(i => i.trim().toLowerCase());
+            const companyIndustry = (company.industry || '').toLowerCase();
+            
+            if (industries.includes('all') || industries.some(industry => 
+                companyIndustry.includes(industry) || industry.includes(companyIndustry))) {
+                affected = true;
+                description = `Industry-specific event affected ${company.industry || 'your business'}`;
+            }
+        }
+
+        // General market events affect all companies
+        if (event.event_type === 'economic_boom' || event.event_type === 'recession' || 
+            event.event_type === 'market_crash' || event.event_type === 'bull_market') {
+            affected = true;
+            description = 'General market event affected all companies';
+        }
+
+        // Company size specific events
+        if (event.event_type === 'small_business_support' && company.current_valuation < 1000000) {
+            affected = true;
+            description = 'Small business support program benefited your company';
+        }
+
+        if (event.event_type === 'corporate_tax_increase' && company.current_valuation > 5000000) {
+            affected = true;
+            description = 'Large corporation tax changes affected your company';
+        }
+
+        return {
+            affected,
+            positive,
+            eventName: event.event_name,
+            description,
+            multiplier: event.impact_multiplier
+        };
+    },
+
+    getEventIcon(eventType) {
+        const icons = {
+            'economic_boom': '🚀',
+            'recession': '📉',
+            'market_crash': '💥',
+            'bull_market': '🐂',
+            'bear_market': '🐻',
+            'tech_bubble': '💻',
+            'commodity_surge': '🛢️',
+            'currency_crisis': '💱',
+            'trade_war': '⚔️',
+            'natural_disaster': '🌪️',
+            'political_uncertainty': '🗳️',
+            'interest_rate_change': '🏦',
+            'inflation_spike': '📈',
+            'supply_chain_disruption': '🚛',
+            'energy_crisis': '⚡',
+            'housing_bubble': '🏠',
+            'startup_boom': '🚀',
+            'merger_wave': '🤝',
+            'regulatory_change': '📜',
+            'innovation_breakthrough': '💡'
+        };
+        return icons[eventType] || '📊';
+    },
+
+    getSeverityIcon(severity) {
+        const icons = {
+            'low': '🟢',
+            'medium': '🟡',
+            'high': '🟠',
+            'critical': '🔴'
+        };
+        return icons[severity] || '⚪';
+    },
+
+    getSeverityColor(severity) {
+        const colors = {
+            'low': 0x32CD32,
+            'medium': 0xFFD700,
+            'high': 0xFF6600,
+            'critical': 0xFF0000
+        };
+        return colors[severity] || 0x808080;
+    },
+
+    // Static method to generate random market events (called by economic scheduler)
+    generateRandomEvent() {
+        const eventTypes = [
+            {
+                type: 'economic_boom',
+                name: 'Economic Boom',
+                description: 'Strong economic growth boosts all sectors',
+                impact: 1.15,
+                duration: 3,
+                probability: 0.15,
+                severity: 'medium'
+            },
+            {
+                type: 'recession',
+                name: 'Economic Recession',
+                description: 'Economic downturn reduces business performance',
+                impact: 0.85,
+                duration: 4,
+                probability: 0.10,
+                severity: 'high'
+            },
+            {
+                type: 'tech_bubble',
+                name: 'Technology Bubble',
+                description: 'Tech companies experience massive valuation increases',
+                impact: 1.30,
+                duration: 2,
+                probability: 0.08,
+                severity: 'medium',
+                industries: 'technology,software,internet'
+            },
+            {
+                type: 'commodity_surge',
+                name: 'Commodity Price Surge',
+                description: 'Raw material prices spike affecting manufacturing',
+                impact: 0.90,
+                duration: 2,
+                probability: 0.12,
+                severity: 'medium',
+                industries: 'manufacturing,energy,mining'
+            },
+            {
+                type: 'supply_chain_disruption',
+                name: 'Supply Chain Disruption',
+                description: 'Global supply chain issues impact logistics and manufacturing',
+                impact: 0.82,
+                duration: 3,
+                probability: 0.15,
+                severity: 'high',
+                industries: 'logistics,manufacturing,retail'
+            },
+            {
+                type: 'startup_boom',
+                name: 'Startup Investment Boom',
+                description: 'Venture capital floods the market for new businesses',
+                impact: 1.25,
+                duration: 2,
+                probability: 0.10,
+                severity: 'low',
+                industries: 'technology,innovation'
+            },
+            {
+                type: 'regulatory_change',
+                name: 'Regulatory Reform',
+                description: 'New government regulations affect business operations',
+                impact: 0.92,
+                duration: 6,
+                probability: 0.08,
+                severity: 'medium'
+            },
+            {
+                type: 'innovation_breakthrough',
+                name: 'Innovation Breakthrough',
+                description: 'Major technological advancement boosts innovation sectors',
+                impact: 1.20,
+                duration: 4,
+                probability: 0.07,
+                severity: 'low',
+                industries: 'technology,research,healthcare'
+            },
+            {
+                type: 'energy_crisis',
+                name: 'Energy Crisis',
+                description: 'Energy shortages increase operational costs across industries',
+                impact: 0.88,
+                duration: 3,
+                probability: 0.09,
+                severity: 'high',
+                industries: 'energy,manufacturing,transportation'
+            },
+            {
+                type: 'merger_wave',
+                name: 'Corporate Merger Wave',
+                description: 'Increased M&A activity drives up company valuations',
+                impact: 1.12,
+                duration: 2,
+                probability: 0.11,
+                severity: 'low'
+            }
+        ];
+
+        // Select random event based on probability
+        const totalProbability = eventTypes.reduce((sum, event) => sum + event.probability, 0);
+        const random = Math.random() * totalProbability;
+        
+        let currentSum = 0;
+        for (const eventType of eventTypes) {
+            currentSum += eventType.probability;
+            if (random <= currentSum) {
+                return {
+                    ...eventType,
+                    startDate: new Date(),
+                    endDate: new Date(Date.now() + (eventType.duration * 30 * 24 * 60 * 60 * 1000)) // Convert months to milliseconds
+                };
+            }
+        }
+
+        return eventTypes[0]; // Fallback
+    },
+
+    async createMarketEvent(client, eventData) {
+        try {
+            const result = await client.db.db.run(`
+                INSERT INTO market_events 
+                (event_name, event_type, description, impact_multiplier, 
+                 affected_industries, severity, start_date, end_date, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            `, [
+                eventData.name,
+                eventData.type,
+                eventData.description,
+                eventData.impact,
+                eventData.industries || null,
+                eventData.severity,
+                eventData.startDate.toISOString(),
+                eventData.endDate.toISOString()
+            ]);
+
+            return result.lastID;
+
+        } catch (error) {
+            console.error('Error creating market event:', error);
+            return null;
+        }
+    },
+
+    async endExpiredEvents(client) {
+        try {
+            const now = new Date().toISOString();
+            
+            await client.db.db.run(`
+                UPDATE market_events 
+                SET is_active = 0 
+                WHERE end_date <= ? AND is_active = 1
+            `, [now]);
+
+            console.log('Expired market events ended');
+
+        } catch (error) {
+            console.error('Error ending expired events:', error);
+        }
+    }
+};

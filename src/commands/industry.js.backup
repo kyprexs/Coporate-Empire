@@ -1,0 +1,565 @@
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
+module.exports = {
+    data: new SlashCommandBuilder()
+        .setName('industry')
+        .setDescription('Industry specialization and market analysis')
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('specialize')
+                .setDescription('Specialize your company in a specific industry')
+                .addStringOption(option =>
+                    option
+                        .setName('company')
+                        .setDescription('Company to specialize')
+                        .setRequired(true)
+                )
+                .addStringOption(option =>
+                    option
+                        .setName('industry_type')
+                        .setDescription('Industry specialization')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: 'Technology (1.3x revenue, high R&D benefits)', value: 'technology' },
+                            { name: 'Finance (1.25x revenue, market sensitive)', value: 'finance' },
+                            { name: 'Healthcare (1.2x revenue, stable demand)', value: 'healthcare' },
+                            { name: 'Energy (1.15x revenue, commodity dependent)', value: 'energy' },
+                            { name: 'Manufacturing (1.1x revenue, scale efficient)', value: 'manufacturing' },
+                            { name: 'Retail (1.0x revenue, consumer focused)', value: 'retail' },
+                            { name: 'Agriculture (0.9x revenue, weather dependent)', value: 'agriculture' },
+                            { name: 'Hospitality (0.85x revenue, seasonal)', value: 'hospitality' }
+                        )
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('analysis')
+                .setDescription('View industry market analysis and trends')
+                .addStringOption(option =>
+                    option
+                        .setName('industry_type')
+                        .setDescription('Industry to analyze (optional)')
+                        .addChoices(
+                            { name: 'Technology', value: 'technology' },
+                            { name: 'Finance', value: 'finance' },
+                            { name: 'Healthcare', value: 'healthcare' },
+                            { name: 'Energy', value: 'energy' },
+                            { name: 'Manufacturing', value: 'manufacturing' },
+                            { name: 'Retail', value: 'retail' },
+                            { name: 'Agriculture', value: 'agriculture' },
+                            { name: 'Hospitality', value: 'hospitality' }
+                        )
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('leaders')
+                .setDescription('View industry leaders and market share')
+        ),
+
+    async execute(interaction, client) {
+        const subcommand = interaction.options.getSubcommand();
+
+        switch (subcommand) {
+            case 'specialize':
+                await this.handleSpecialize(interaction, client);
+                break;
+            case 'analysis':
+                await this.handleAnalysis(interaction, client);
+                break;
+            case 'leaders':
+                await this.handleLeaders(interaction, client);
+                break;
+        }
+    },
+
+    async handleSpecialize(interaction, client) {
+        try {
+            const companyQuery = interaction.options.getString('company');
+            const industryType = interaction.options.getString('industry_type');
+
+            // Find the user's company
+            const company = await client.db.getUserCompany(interaction.user.id, companyQuery);
+            if (!company) {
+                await interaction.reply({
+                    content: '❌ Company not found or you don\'t own this company.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check if company already has this specialization
+            if (company.industry_specialization === industryType) {
+                await interaction.reply({
+                    content: `❌ ${company.name} is already specialized in ${this.getIndustryName(industryType)}.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Calculate specialization cost
+            const specializationCost = this.calculateSpecializationCost(company, industryType);
+
+            // Check if company has sufficient funds
+            if (company.cash < specializationCost) {
+                await interaction.reply({
+                    content: `❌ Specialization costs $${specializationCost.toLocaleString()}. ${company.name} has $${company.cash.toLocaleString()}.`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Process specialization
+            await client.db.db.run('BEGIN TRANSACTION');
+
+            try {
+                // Update company industry specialization
+                await client.db.db.run(`
+                    UPDATE companies 
+                    SET industry_specialization = ?, specialization_date = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                `, [industryType, company.id]);
+
+                // Deduct specialization cost
+                await client.db.updateUserCash(company.owner_id, -specializationCost);
+
+                // Apply initial industry benefits
+                const benefits = this.getIndustryBenefits(industryType);
+                await client.db.db.run(`
+                    UPDATE companies 
+                    SET current_valuation = current_valuation * ?,
+                        efficiency_rating = COALESCE(efficiency_rating, 1.0) * ?
+                    WHERE id = ?
+                `, [benefits.valuationBoost, benefits.efficiencyBoost, company.id]);
+
+                await client.db.db.run('COMMIT');
+
+                const embed = new EmbedBuilder()
+                    .setTitle('🏭 Industry Specialization Complete!')
+                    .setColor(0x32CD32)
+                    .addFields(
+                        { name: 'Company', value: company.name, inline: true },
+                        { name: 'New Specialization', value: this.getIndustryName(industryType), inline: true },
+                        { name: 'Specialization Cost', value: `$${specializationCost.toLocaleString()}`, inline: true },
+                        { name: 'Revenue Multiplier', value: `${benefits.revenueMultiplier}x`, inline: true },
+                        { name: 'Valuation Boost', value: `+${((benefits.valuationBoost - 1) * 100).toFixed(1)}%`, inline: true },
+                        { name: 'Efficiency Boost', value: `+${((benefits.efficiencyBoost - 1) * 100).toFixed(1)}%`, inline: true }
+                    )
+                    .setDescription(`🎉 ${company.name} is now specialized in ${this.getIndustryName(industryType)}! Your company will benefit from industry-specific advantages and higher revenue potential.`)
+                    .setTimestamp()
+                    .setFooter({ text: 'Corporate Empire Industry Council' });
+
+                // Add industry-specific information
+                embed.addFields({
+                    name: '📊 Industry Benefits',
+                    value: this.getIndustryDescription(industryType),
+                    inline: false
+                });
+
+                await interaction.reply({ embeds: [embed] });
+
+            } catch (error) {
+                await client.db.db.run('ROLLBACK');
+                throw error;
+            }
+
+        } catch (error) {
+            console.error('Error in industry specialize command:', error);
+            await interaction.reply({
+                content: '❌ There was an error processing the industry specialization.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async handleAnalysis(interaction, client) {
+        try {
+            const industryType = interaction.options.getString('industry_type');
+
+            if (industryType) {
+                // Analyze specific industry
+                await this.analyzeSpecificIndustry(interaction, client, industryType);
+            } else {
+                // Show overall industry overview
+                await this.showIndustryOverview(interaction, client);
+            }
+
+        } catch (error) {
+            console.error('Error in industry analysis command:', error);
+            await interaction.reply({
+                content: '❌ There was an error generating the industry analysis.',
+                ephemeral: true
+            });
+        }
+    },
+
+    async analyzeSpecificIndustry(interaction, client, industryType) {
+        // Get companies in this industry
+        const industryCompanies = await client.db.db.all(`
+            SELECT c.*, u.username as owner_username
+            FROM companies c
+            JOIN users u ON c.owner_id = u.discord_id
+            WHERE c.industry_specialization = ? AND c.status = 'active'
+            ORDER BY c.current_valuation DESC
+        `, [industryType]);
+
+        // Calculate industry statistics
+        const totalCompanies = industryCompanies.length;
+        const totalMarketCap = industryCompanies.reduce((sum, c) => sum + c.current_valuation, 0);
+        const avgValuation = totalCompanies > 0 ? totalMarketCap / totalCompanies : 0;
+
+        // Get recent performance data
+        const industryPerformance = await client.db.db.get(`
+            SELECT 
+                COUNT(*) as companies_with_data,
+                AVG(cp.net_monthly_income) as avg_monthly_profit,
+                SUM(cp.total_revenue) as total_industry_revenue
+            FROM company_performance cp
+            JOIN companies c ON cp.company_id = c.id
+            WHERE c.industry_specialization = ?
+            AND cp.period = (
+                SELECT period FROM company_performance 
+                ORDER BY period DESC LIMIT 1
+            )
+        `, [industryType]);
+
+        const benefits = this.getIndustryBenefits(industryType);
+
+        const embed = new EmbedBuilder()
+            .setTitle(`${this.getIndustryIcon(industryType)} ${this.getIndustryName(industryType)} Industry Analysis`)
+            .setColor(this.getIndustryColor(industryType))
+            .addFields(
+                { name: '🏢 Total Companies', value: totalCompanies.toString(), inline: true },
+                { name: '💰 Total Market Cap', value: `$${totalMarketCap.toLocaleString()}`, inline: true },
+                { name: '📊 Avg Company Value', value: `$${avgValuation.toLocaleString()}`, inline: true },
+                { name: '📈 Revenue Multiplier', value: `${benefits.revenueMultiplier}x`, inline: true },
+                { name: '🎯 Specialization Cost', value: `$${this.getSpecializationBaseCost(industryType).toLocaleString()}`, inline: true }
+            )
+            .setDescription(this.getIndustryDescription(industryType))
+            .setTimestamp()
+            .setFooter({ text: 'Corporate Empire Industry Council' });
+
+        if (industryPerformance && industryPerformance.companies_with_data > 0) {
+            embed.addFields(
+                { name: '💵 Avg Monthly Profit', value: `$${(industryPerformance.avg_monthly_profit || 0).toLocaleString()}`, inline: true },
+                { name: '🏭 Total Industry Revenue', value: `$${(industryPerformance.total_industry_revenue || 0).toLocaleString()}`, inline: true }
+            );
+        }
+
+        // Top companies in industry
+        if (industryCompanies.length > 0) {
+            let topCompanies = '';
+            industryCompanies.slice(0, 5).forEach((company, index) => {
+                const isPublic = company.shares_available > 0 ? '🌐' : '🔒';
+                topCompanies += `**${index + 1}.** ${company.name} ${isPublic}\n`;
+                topCompanies += `$${company.current_valuation.toLocaleString()} • Owner: ${company.owner_username}\n\n`;
+            });
+
+            embed.addFields({
+                name: '🏆 Industry Leaders',
+                value: topCompanies,
+                inline: false
+            });
+        }
+
+        await interaction.reply({ embeds: [embed] });
+    },
+
+    async showIndustryOverview(interaction, client) {
+        // Get all industry statistics
+        const industryStats = await client.db.db.all(`
+            SELECT 
+                industry_specialization,
+                COUNT(*) as company_count,
+                SUM(current_valuation) as total_market_cap,
+                AVG(current_valuation) as avg_valuation
+            FROM companies 
+            WHERE status = 'active' AND industry_specialization IS NOT NULL
+            GROUP BY industry_specialization
+            ORDER BY total_market_cap DESC
+        `);
+
+        const embed = new EmbedBuilder()
+            .setTitle('🏭 Industry Market Overview')
+            .setColor(0x0099FF)
+            .setDescription('Analysis of all industry sectors in the Corporate Empire economy')
+            .setTimestamp()
+            .setFooter({ text: 'Corporate Empire Industry Council' });
+
+        if (industryStats.length === 0) {
+            embed.setDescription('📊 No companies have specialized in specific industries yet. Use `/industry specialize` to gain competitive advantages!');
+            embed.setColor(0xFFD700);
+        } else {
+            let industryOverview = '';
+            let totalSpecializedCompanies = 0;
+            let totalSpecializedMarketCap = 0;
+
+            industryStats.forEach((industry, index) => {
+                const icon = this.getIndustryIcon(industry.industry_specialization);
+                const benefits = this.getIndustryBenefits(industry.industry_specialization);
+                
+                industryOverview += `${icon} **${this.getIndustryName(industry.industry_specialization)}**\n`;
+                industryOverview += `Companies: ${industry.company_count} • Market Cap: $${industry.total_market_cap.toLocaleString()}\n`;
+                industryOverview += `Revenue Multiplier: ${benefits.revenueMultiplier}x • Avg Valuation: $${industry.avg_valuation.toLocaleString()}\n\n`;
+
+                totalSpecializedCompanies += industry.company_count;
+                totalSpecializedMarketCap += industry.total_market_cap;
+            });
+
+            embed.addFields({
+                name: '📈 Industry Breakdown',
+                value: industryOverview,
+                inline: false
+            });
+
+            embed.addFields(
+                { name: '🏢 Total Specialized Companies', value: totalSpecializedCompanies.toString(), inline: true },
+                { name: '💰 Total Specialized Market Cap', value: `$${totalSpecializedMarketCap.toLocaleString()}`, inline: true }
+            );
+        }
+
+        // Show unspecialized companies
+        const unspecialized = await client.db.db.get(`
+            SELECT COUNT(*) as count, SUM(current_valuation) as market_cap
+            FROM companies 
+            WHERE status = 'active' AND (industry_specialization IS NULL OR industry_specialization = '')
+        `);
+
+        if (unspecialized && unspecialized.count > 0) {
+            embed.addFields({
+                name: '🏢 Unspecialized Companies',
+                value: `${unspecialized.count} companies • $${(unspecialized.market_cap || 0).toLocaleString()} market cap\n\n*These companies could benefit from industry specialization!*`,
+                inline: false
+            });
+        }
+
+        await interaction.reply({ embeds: [embed] });
+    },
+
+    async handleLeaders(interaction, client) {
+        try {
+            // Get top companies by industry
+            const industryLeaders = await client.db.db.all(`
+                SELECT 
+                    c.*,
+                    u.username as owner_username,
+                    ROW_NUMBER() OVER (PARTITION BY c.industry_specialization ORDER BY c.current_valuation DESC) as industry_rank
+                FROM companies c
+                JOIN users u ON c.owner_id = u.discord_id
+                WHERE c.status = 'active' AND c.industry_specialization IS NOT NULL
+                ORDER BY c.industry_specialization, c.current_valuation DESC
+            `);
+
+            const embed = new EmbedBuilder()
+                .setTitle('🏆 Industry Leaders')
+                .setColor(0xFFD700)
+                .setDescription('Top companies by industry specialization')
+                .setTimestamp()
+                .setFooter({ text: 'Corporate Empire Industry Rankings' });
+
+            if (industryLeaders.length === 0) {
+                embed.setDescription('📊 No industry leaders yet. Be the first to specialize and dominate your sector!');
+            } else {
+                // Group by industry
+                const industriesByType = {};
+                industryLeaders.forEach(company => {
+                    if (!industriesByType[company.industry_specialization]) {
+                        industriesByType[company.industry_specialization] = [];
+                    }
+                    if (company.industry_rank <= 3) { // Top 3 per industry
+                        industriesByType[company.industry_specialization].push(company);
+                    }
+                });
+
+                // Display top companies per industry
+                Object.keys(industriesByType).forEach(industryType => {
+                    const companies = industriesByType[industryType];
+                    const icon = this.getIndustryIcon(industryType);
+                    
+                    let leaderText = '';
+                    companies.forEach((company, index) => {
+                        const rankIcon = ['🥇', '🥈', '🥉'][index] || '🏅';
+                        const publicStatus = company.shares_available > 0 ? '🌐' : '🔒';
+                        leaderText += `${rankIcon} **${company.name}** ${publicStatus}\n`;
+                        leaderText += `$${company.current_valuation.toLocaleString()} • ${company.owner_username}\n\n`;
+                    });
+
+                    embed.addFields({
+                        name: `${icon} ${this.getIndustryName(industryType)}`,
+                        value: leaderText,
+                        inline: true
+                    });
+                });
+            }
+
+            await interaction.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error in industry leaders command:', error);
+            await interaction.reply({
+                content: '❌ There was an error retrieving industry leaders.',
+                ephemeral: true
+            });
+        }
+    },
+
+    calculateSpecializationCost(company, industryType) {
+        // Base cost varies by industry complexity
+        const baseCosts = {
+            'technology': 75000,
+            'finance': 100000,
+            'healthcare': 85000,
+            'energy': 90000,
+            'manufacturing': 60000,
+            'retail': 45000,
+            'agriculture': 35000,
+            'hospitality': 40000
+        };
+
+        const baseCost = baseCosts[industryType] || 50000;
+        
+        // Scale with company size
+        const sizeMultiplier = Math.min(3.0, 1 + (company.current_valuation / 1000000));
+        
+        return Math.floor(baseCost * sizeMultiplier);
+    },
+
+    getIndustryBenefits(industryType) {
+        const benefits = {
+            'technology': {
+                revenueMultiplier: 1.30,
+                valuationBoost: 1.15,
+                efficiencyBoost: 1.10,
+                rdBonus: 1.5,
+                marketVolatility: 'high'
+            },
+            'finance': {
+                revenueMultiplier: 1.25,
+                valuationBoost: 1.12,
+                efficiencyBoost: 1.08,
+                rdBonus: 1.0,
+                marketVolatility: 'very_high'
+            },
+            'healthcare': {
+                revenueMultiplier: 1.20,
+                valuationBoost: 1.10,
+                efficiencyBoost: 1.05,
+                rdBonus: 1.3,
+                marketVolatility: 'low'
+            },
+            'energy': {
+                revenueMultiplier: 1.15,
+                valuationBoost: 1.08,
+                efficiencyBoost: 1.12,
+                rdBonus: 1.1,
+                marketVolatility: 'high'
+            },
+            'manufacturing': {
+                revenueMultiplier: 1.10,
+                valuationBoost: 1.05,
+                efficiencyBoost: 1.20,
+                rdBonus: 1.2,
+                marketVolatility: 'medium'
+            },
+            'retail': {
+                revenueMultiplier: 1.00,
+                valuationBoost: 1.02,
+                efficiencyBoost: 1.15,
+                rdBonus: 0.8,
+                marketVolatility: 'medium'
+            },
+            'agriculture': {
+                revenueMultiplier: 0.90,
+                valuationBoost: 1.00,
+                efficiencyBoost: 1.10,
+                rdBonus: 0.9,
+                marketVolatility: 'high'
+            },
+            'hospitality': {
+                revenueMultiplier: 0.85,
+                valuationBoost: 0.98,
+                efficiencyBoost: 1.25,
+                rdBonus: 0.7,
+                marketVolatility: 'very_high'
+            }
+        };
+
+        return benefits[industryType] || {
+            revenueMultiplier: 1.0,
+            valuationBoost: 1.0,
+            efficiencyBoost: 1.0,
+            rdBonus: 1.0,
+            marketVolatility: 'medium'
+        };
+    },
+
+    getIndustryName(type) {
+        const names = {
+            'technology': 'Technology',
+            'finance': 'Finance & Banking',
+            'healthcare': 'Healthcare & Pharmaceuticals',
+            'energy': 'Energy & Utilities',
+            'manufacturing': 'Manufacturing & Production',
+            'retail': 'Retail & Consumer Goods',
+            'agriculture': 'Agriculture & Food',
+            'hospitality': 'Hospitality & Tourism'
+        };
+        return names[type] || type;
+    },
+
+    getIndustryIcon(type) {
+        const icons = {
+            'technology': '💻',
+            'finance': '🏦',
+            'healthcare': '🏥',
+            'energy': '⚡',
+            'manufacturing': '🏭',
+            'retail': '🛒',
+            'agriculture': '🌾',
+            'hospitality': '🏨'
+        };
+        return icons[type] || '🏢';
+    },
+
+    getIndustryColor(type) {
+        const colors = {
+            'technology': 0x00BFFF,
+            'finance': 0x228B22,
+            'healthcare': 0xDC143C,
+            'energy': 0xFFD700,
+            'manufacturing': 0x696969,
+            'retail': 0xFF69B4,
+            'agriculture': 0x8FBC8F,
+            'hospitality': 0xFF6347
+        };
+        return colors[type] || 0x808080;
+    },
+
+    getIndustryDescription(type) {
+        const descriptions = {
+            'technology': 'High-growth potential with significant R&D advantages. Sensitive to innovation cycles and tech bubbles.',
+            'finance': 'Strong revenue streams but highly sensitive to market volatility and economic cycles.',
+            'healthcare': 'Stable demand with moderate growth. Benefits from research investments and regulatory protection.',
+            'energy': 'Commodity-dependent revenues with infrastructure advantages. Affected by energy market cycles.',
+            'manufacturing': 'Scale-efficient operations with strong efficiency bonuses. Moderate growth potential.',
+            'retail': 'Consumer-focused with seasonal variations. Steady but competitive market.',
+            'agriculture': 'Weather and commodity dependent. Lower margins but essential industry.',
+            'hospitality': 'Tourism and entertainment focused. Highly seasonal and event-dependent revenues.'
+        };
+        return descriptions[type] || 'General business operations without specialization.';
+    },
+
+    getSpecializationBaseCost(industryType) {
+        const baseCosts = {
+            'technology': 75000,
+            'finance': 100000,
+            'healthcare': 85000,
+            'energy': 90000,
+            'manufacturing': 60000,
+            'retail': 45000,
+            'agriculture': 35000,
+            'hospitality': 40000
+        };
+        return baseCosts[industryType] || 50000;
+    }
+};
